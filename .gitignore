@@ -1,0 +1,6 @@
+models/
+dumps/
+build/
+*.safetensors
+hello
+__pycache__/
