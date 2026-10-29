@@ -17,6 +17,7 @@ constexpr int KV_DIM = N_KV_HEADS * HEAD_DIM;  // 512
 constexpr int FFN = 8192;           // intermediate_size
 constexpr int VOCAB = 128256;       // vocab_size
 constexpr float RMS_EPS = 1e-5f;    // rms_norm_eps
+constexpr int MAX_PROMPT_LEN = 512; // our own limit; buffers are sized for this many tokens
 
 using bf16 = __nv_bfloat16;
 

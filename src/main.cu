@@ -1,6 +1,8 @@
 // tiny-llm-infer entry point. Step 4: load the weights and prove the pointers are right.
 #include <cstdio>
+#include <fstream>
 #include <string>
+#include <vector>
 
 #include "model.h"
 
@@ -23,6 +25,28 @@ static void printFirst(const char *name, const bf16 *gpu_ptr, int n = 8) {
     std::printf("]\n");
 }
 
+// Step 5: read the prompt's token ids (written by python/reference.py) from a text file.
+static std::vector<int> readTokens(const std::string &path) {
+    std::ifstream f(path);
+    if (!f) {
+        std::fprintf(stderr, "cannot open %s (run python/reference.py first)\n", path.c_str());
+        std::exit(1);
+    }
+    std::vector<int> ids;
+    for (int id; f >> id;) {  // read whitespace-separated integers until the file ends
+        if (id < 0 || id >= VOCAB) {
+            std::fprintf(stderr, "token id %d is outside the vocabulary\n", id);
+            std::exit(1);
+        }
+        ids.push_back(id);
+    }
+    if (ids.empty() || (int)ids.size() > MAX_PROMPT_LEN) {
+        std::fprintf(stderr, "prompt has %zu tokens; need 1..%d\n", ids.size(), MAX_PROMPT_LEN);
+        std::exit(1);
+    }
+    return ids;
+}
+
 int main(int argc, char **argv) {
     std::string path = argc > 1 ? argv[1] : "models/llama-3.2-1b-instruct/model.safetensors";
     printGPU();
@@ -34,6 +58,22 @@ int main(int argc, char **argv) {
     printFirst("model.embed_tokens.weight", w.embed);
     printFirst("model.layers.15.mlp.down_proj.weight", w.layers[15].down);
 
+    // ---- Step 5: token ids → GPU
+    std::vector<int> tokens = readTokens("dumps/tokens.txt");
+    const int T = (int)tokens.size();
+
+    int *d_tokens = nullptr;  // d_ prefix = lives on the device (GPU)
+    CUDA_CHECK(cudaMalloc(&d_tokens, MAX_PROMPT_LEN * sizeof(int)));
+    CUDA_CHECK(cudaMemcpy(d_tokens, tokens.data(), T * sizeof(int), cudaMemcpyHostToDevice));
+
+    // Round trip: copy back from the GPU and check nothing changed.
+    std::vector<int> check(T);
+    CUDA_CHECK(cudaMemcpy(check.data(), d_tokens, T * sizeof(int), cudaMemcpyDeviceToHost));
+    std::printf("tokens: %d on GPU, round trip %s\n", T, check == tokens ? "OK" : "MISMATCH");
+    std::printf("  first 5: %d %d %d %d %d ... last: %d\n", tokens[0], tokens[1], tokens[2],
+                tokens[3], tokens[4], tokens[T - 1]);
+
+    CUDA_CHECK(cudaFree(d_tokens));
     freeWeights(w);
     return 0;
 }
