@@ -1,0 +1,13 @@
+# C++ / CUDA static analysis. Catches real bugs (overflow, uninitialized values, unsafe casts)
+# rather than style nitpicks.
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  clang-analyzer-*,
+  performance-*,
+  readability-misleading-indentation,
+  modernize-use-nullptr
+WarningsAsErrors: ''
+HeaderFilterRegex: 'src/.*'

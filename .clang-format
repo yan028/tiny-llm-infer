@@ -1,0 +1,9 @@
+# C++ / CUDA formatting. Run: clang-format -i src/*.cu src/*.h
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100
+AccessModifierOffset: -4
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: WithoutElse
+AlignTrailingComments: true
+SortIncludes: true

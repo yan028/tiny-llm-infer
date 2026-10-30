@@ -1,9 +1,11 @@
 // tiny-llm-infer entry point. Step 4: load the weights and prove the pointers are right.
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
 
+#include "kernels.h"
 #include "model.h"
 
 static void printGPU() {
@@ -17,16 +19,27 @@ static void printGPU() {
 
 // Copy the first n bf16 values of a GPU tensor back to the host and print them as floats.
 // Same format as python/inspect_safetensors.py, so the two outputs can be compared by eye.
-static void printFirst(const char *name, const bf16 *gpu_ptr, int n = 8) {
+static void printFirst(const char* name, const bf16* gpu_ptr, int n = 8) {
     bf16 host[8];
     CUDA_CHECK(cudaMemcpy(host, gpu_ptr, n * sizeof(bf16), cudaMemcpyDeviceToHost));
     std::printf("  %s: [", name);
-    for (int i = 0; i < n; ++i) std::printf("'%.6g'%s", __bfloat162float(host[i]), i + 1 < n ? ", " : "");
+    for (int i = 0; i < n; ++i)
+        std::printf("'%.6g'%s", __bfloat162float(host[i]), i + 1 < n ? ", " : "");
     std::printf("]\n");
 }
 
+// Copy n bf16 values from the GPU and write them raw to a file, for python/compare.py.
+static void dumpBuffer(const std::string& path, const bf16* d_ptr, size_t n) {
+    std::vector<bf16> host(n);
+    CUDA_CHECK(cudaMemcpy(host.data(), d_ptr, n * sizeof(bf16), cudaMemcpyDeviceToHost));
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(host.data()), n * sizeof(bf16));
+    std::printf("dumped %s (%zu values)\n", path.c_str(), n);
+}
+
 // Step 5: read the prompt's token ids (written by python/reference.py) from a text file.
-static std::vector<int> readTokens(const std::string &path) {
+static std::vector<int> readTokens(const std::string& path) {
     std::ifstream f(path);
     if (!f) {
         std::fprintf(stderr, "cannot open %s (run python/reference.py first)\n", path.c_str());
@@ -47,7 +60,7 @@ static std::vector<int> readTokens(const std::string &path) {
     return ids;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char** argv) {
     std::string path = argc > 1 ? argv[1] : "models/llama-3.2-1b-instruct/model.safetensors";
     printGPU();
 
@@ -62,7 +75,7 @@ int main(int argc, char **argv) {
     std::vector<int> tokens = readTokens("dumps/tokens.txt");
     const int T = (int)tokens.size();
 
-    int *d_tokens = nullptr;  // d_ prefix = lives on the device (GPU)
+    int* d_tokens = nullptr;  // d_ prefix = lives on the device (GPU)
     CUDA_CHECK(cudaMalloc(&d_tokens, MAX_PROMPT_LEN * sizeof(int)));
     CUDA_CHECK(cudaMemcpy(d_tokens, tokens.data(), T * sizeof(int), cudaMemcpyHostToDevice));
 
@@ -73,6 +86,14 @@ int main(int argc, char **argv) {
     std::printf("  first 5: %d %d %d %d %d ... last: %d\n", tokens[0], tokens[1], tokens[2],
                 tokens[3], tokens[4], tokens[T - 1]);
 
+    // ---- Step 6: embedding gather → hidden state (the residual stream x)
+    bf16* d_hidden = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_hidden, (size_t)MAX_PROMPT_LEN * HIDDEN * sizeof(bf16)));
+    embeddingGather(d_tokens, w.embed, d_hidden, T);
+    CUDA_CHECK(cudaDeviceSynchronize());  // wait for the kernel; also surfaces errors inside it
+    dumpBuffer("out/embed.bin", d_hidden, (size_t)T * HIDDEN);
+
+    CUDA_CHECK(cudaFree(d_hidden));
     CUDA_CHECK(cudaFree(d_tokens));
     freeWeights(w);
     return 0;

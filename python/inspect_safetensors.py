@@ -6,6 +6,7 @@ File layout:
 Usage:
   python python/inspect_safetensors.py models/llama-3.2-1b-instruct/model.safetensors
 """
+
 import json
 import struct
 import sys
@@ -57,7 +58,7 @@ def main(path):
         if ".layers." not in name or ".layers.0." in name:
             print(f"{name:55s} {dtype:5s} {str(shape):15s} [{start:>13,} .. {end:>13,})")
 
-    print(f"\n(layers 1-15 omitted; same 9 tensors each)")
+    print("\n(layers 1-15 omitted; same 9 tensors each)")
     print(f"total parameters: {total_params:,}")
     print(f"data section fully covered: {expected_start == data_size}")
     print(f"layout problems: {problems}")

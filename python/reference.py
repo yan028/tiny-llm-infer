@@ -11,6 +11,7 @@ Usage:
   python python/reference.py                                   # default prompt
   python python/reference.py --prompt "Explain KV cache in one sentence."
 """
+
 import argparse
 import json
 import math
@@ -38,6 +39,7 @@ def dump(name, t):
 
 
 # ---------------------------------------------------------------- building blocks
+
 
 def rms_norm(x, w, eps):
     # x: (T, 2048). Divide each row by its root-mean-square, then scale by the learned weight.
@@ -77,76 +79,97 @@ def apply_rope(x, cos, sin):
 
 # ---------------------------------------------------------------- forward pass
 
+
 @torch.no_grad()
 def forward(tokens, W, cfg, dump_layer=0):
-    D = cfg["hidden_size"]                         # 2048
-    n_q = cfg["num_attention_heads"]               # 32
-    n_kv = cfg["num_key_value_heads"]              # 8
-    hd = cfg.get("head_dim", D // n_q)             # 64
-    eps = cfg["rms_norm_eps"]                      # 1e-5
+    D = cfg["hidden_size"]  # 2048
+    n_q = cfg["num_attention_heads"]  # 32
+    n_kv = cfg["num_key_value_heads"]  # 8
+    hd = cfg.get("head_dim", D // n_q)  # 64
+    eps = cfg["rms_norm_eps"]  # 1e-5
     T = tokens.shape[0]
 
     def w(name):  # weights are stored in bf16; compute in fp32 for a clean reference
         return W[name].float()
 
     # Embedding lookup: one row of the 128256 x 2048 table per token.
-    x = w("model.embed_tokens.weight")[tokens]                     # (T, 2048)
+    x = w("model.embed_tokens.weight")[tokens]  # (T, 2048)
     dump("embed", x)
 
     # RoPE angles for positions 0..T-1, shared by every layer.
     inv_freq = rope_inv_freq(cfg, hd).to(x.device)
     pos = torch.arange(T, device=x.device, dtype=torch.float32)
-    angles = torch.outer(pos, inv_freq)                            # (T, 32)
-    angles = torch.cat([angles, angles], dim=-1)                   # (T, 64)
+    angles = torch.outer(pos, inv_freq)  # (T, 32)
+    angles = torch.cat([angles, angles], dim=-1)  # (T, 64)
     cos, sin = angles.cos(), angles.sin()
 
     causal = torch.ones(T, T, dtype=torch.bool, device=x.device).tril()
 
     for L in range(cfg["num_hidden_layers"]):
         p = f"model.layers.{L}."
-        d = (lambda name, t: dump(f"l{L}_{name}", t)) if L == dump_layer else (lambda name, t: None)
+        d = (
+            (lambda name, t, L=L: dump(f"l{L}_{name}", t))
+            if dump_layer == L
+            else (lambda name, t: None)
+        )
 
         # ---- attention branch
-        h = rms_norm(x, w(p + "input_layernorm.weight"), eps);     d("attn_norm", h)
-        q = h @ w(p + "self_attn.q_proj.weight").T                 # (T, 2048)
-        k = h @ w(p + "self_attn.k_proj.weight").T                 # (T, 512)
-        v = h @ w(p + "self_attn.v_proj.weight").T                 # (T, 512)
-        d("q", q); d("k", k); d("v", v)
+        h = rms_norm(x, w(p + "input_layernorm.weight"), eps)
+        d("attn_norm", h)
+        q = h @ w(p + "self_attn.q_proj.weight").T  # (T, 2048)
+        k = h @ w(p + "self_attn.k_proj.weight").T  # (T, 512)
+        v = h @ w(p + "self_attn.v_proj.weight").T  # (T, 512)
+        d("q", q)
+        d("k", k)
+        d("v", v)
 
-        q = apply_rope(q.view(T, n_q, hd), cos, sin)               # (T, 32, 64)
-        k = apply_rope(k.view(T, n_kv, hd), cos, sin)              # (T, 8, 64)
+        q = apply_rope(q.view(T, n_q, hd), cos, sin)  # (T, 32, 64)
+        k = apply_rope(k.view(T, n_kv, hd), cos, sin)  # (T, 8, 64)
         v = v.view(T, n_kv, hd)
-        d("q_rope", q.reshape(T, -1)); d("k_rope", k.reshape(T, -1))
+        d("q_rope", q.reshape(T, -1))
+        d("k_rope", k.reshape(T, -1))
 
         # GQA: Q head i uses KV head i // 4.
         rep = n_q // n_kv
-        k_full = k.repeat_interleave(rep, dim=1)                   # (T, 32, 64)
+        k_full = k.repeat_interleave(rep, dim=1)  # (T, 32, 64)
         v_full = v.repeat_interleave(rep, dim=1)
 
-        qh, kh, vh = q.transpose(0, 1), k_full.transpose(0, 1), v_full.transpose(0, 1)  # (32, T, 64)
-        scores = qh @ kh.transpose(1, 2) / math.sqrt(hd)           # (32, T, T)
+        qh, kh, vh = (
+            q.transpose(0, 1),
+            k_full.transpose(0, 1),
+            v_full.transpose(0, 1),
+        )  # (32, T, 64)
+        scores = qh @ kh.transpose(1, 2) / math.sqrt(hd)  # (32, T, T)
         d("scores", scores)
-        scores = scores.masked_fill(~causal, float("-inf"))        # causal mask
-        probs = torch.softmax(scores, dim=-1);                     d("probs", probs)
-        attn = (probs @ vh).transpose(0, 1).reshape(T, n_q * hd)   # (T, 2048), heads concatenated
+        scores = scores.masked_fill(~causal, float("-inf"))  # causal mask
+        probs = torch.softmax(scores, dim=-1)
+        d("probs", probs)
+        attn = (probs @ vh).transpose(0, 1).reshape(T, n_q * hd)  # (T, 2048), heads concatenated
         d("attn_out", attn)
-        o = attn @ w(p + "self_attn.o_proj.weight").T;             d("o_proj", o)
-        x = x + o;                                                 d("resid1", x)
+        o = attn @ w(p + "self_attn.o_proj.weight").T
+        d("o_proj", o)
+        x = x + o
+        d("resid1", x)
 
         # ---- MLP branch (SwiGLU)
-        h = rms_norm(x, w(p + "post_attention_layernorm.weight"), eps); d("mlp_norm", h)
-        gate = h @ w(p + "mlp.gate_proj.weight").T                 # (T, 8192)
-        up = h @ w(p + "mlp.up_proj.weight").T                     # (T, 8192)
-        d("gate", gate); d("up", up)
-        act = torch.nn.functional.silu(gate) * up;                 d("silu_mul", act)
-        down = act @ w(p + "mlp.down_proj.weight").T;              d("down", down)
+        h = rms_norm(x, w(p + "post_attention_layernorm.weight"), eps)
+        d("mlp_norm", h)
+        gate = h @ w(p + "mlp.gate_proj.weight").T  # (T, 8192)
+        up = h @ w(p + "mlp.up_proj.weight").T  # (T, 8192)
+        d("gate", gate)
+        d("up", up)
+        act = torch.nn.functional.silu(gate) * up
+        d("silu_mul", act)
+        down = act @ w(p + "mlp.down_proj.weight").T
+        d("down", down)
         x = x + down
 
         dump(f"layer{L}_out", x)
 
-    x = rms_norm(x, w("model.norm.weight"), eps);                  dump("final_norm", x)
+    x = rms_norm(x, w("model.norm.weight"), eps)
+    dump("final_norm", x)
     # Tied weights: the output projection reuses the embedding table.
-    logits = x @ w("model.embed_tokens.weight").T                  # (T, 128256)
+    logits = x @ w("model.embed_tokens.weight").T  # (T, 128256)
     dump("logits", logits)
     return logits
 
@@ -159,14 +182,16 @@ def main():
     os.makedirs(DUMP_DIR, exist_ok=True)
     dev = "cuda"
 
-    cfg = json.load(open(os.path.join(args.model_dir, "config.json")))
+    with open(os.path.join(args.model_dir, "config.json")) as f:
+        cfg = json.load(f)
     tok = AutoTokenizer.from_pretrained(args.model_dir)
 
     ids = tok.apply_chat_template(
         [{"role": "user", "content": args.prompt}],
-        add_generation_prompt=True, date_string=DATE_STRING,
+        add_generation_prompt=True,
+        date_string=DATE_STRING,
     )
-    if not isinstance(ids, list):        # some transformers versions return a dict-like object
+    if not isinstance(ids, list):  # some transformers versions return a dict-like object
         ids = list(ids["input_ids"])
     with open(os.path.join(DUMP_DIR, "tokens.txt"), "w") as f:
         f.write(" ".join(map(str, ids)) + "\n")
@@ -192,7 +217,9 @@ def main():
     torch.cuda.empty_cache()
 
     # ---- Hugging Face check (bf16, so expect small differences from our fp32 math)
-    model = LlamaForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16).to(dev).eval()
+    model = (
+        LlamaForCausalLM.from_pretrained(args.model_dir, torch_dtype=torch.bfloat16).to(dev).eval()
+    )
     with torch.no_grad():
         out = model(tokens[None], output_hidden_states=True)
     hf_logits = out.logits[0].float()
@@ -207,7 +234,11 @@ def main():
     print(f"HF:   top-5 {hf_top5}")
     print(f"layer0_out rel err vs HF: {rel(ours_l0, hf_l0):.2e}")
     print(f"last-row logits rel err vs HF: {rel(logits[-1].cpu(), hf_logits[-1].cpu()):.2e}")
-    print("PASS: first token matches HF" if ours_next == hf_next else "FAIL: first token differs from HF")
+    print(
+        "PASS: first token matches HF"
+        if ours_next == hf_next
+        else "FAIL: first token differs from HF"
+    )
 
 
 if __name__ == "__main__":

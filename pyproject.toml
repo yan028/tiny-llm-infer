@@ -1,0 +1,8 @@
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+# E/W: pycodestyle, F: pyflakes (unused imports, undefined names), I: import order,
+# B: bugbear (likely bugs), UP: modern syntax, SIM: simplifications
+select = ["E", "W", "F", "I", "B", "UP", "SIM"]
