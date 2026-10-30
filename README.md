@@ -62,8 +62,8 @@ Milestone 1 is the course's "single token inference": produce the same first tok
 - [x] **Step 3 — Golden reference.** Hand-written forward pass in PyTorch. Predicts token 791 `The`, same top-5 as Hugging Face; relative error vs HF about 1e-2.
 - [x] **Step 4 — C++ loader.** One `cudaMalloc` for all weights, streamed through a pinned buffer, each tensor's pointer bound and shape-checked. Values read back from the GPU match the Python parser exactly.
 - [x] **Step 5 — Token ids to the GPU.** Ids come from the Python tokenizer; prompts are capped at 512 tokens.
-- [ ] **Step 6 — Embedding gather kernel.** One block per token; exact match with the reference.
-- [ ] **Step 7 — RMSNorm kernel.** fp32 tree reduction, eps 1e-5.
+- [x] **Step 6 — Embedding gather kernel.** One block per token; exact match with the reference.
+- [x] **Step 7 — RMSNorm kernel.** One block per token, fp32 tree reduction in shared memory; max rel err 2.7e-3 vs reference (bf16 rounding).
 - [ ] **Step 8 — Q/K/V projections** with `cublasGemmEx` (row-major/column-major transposition trick).
 - [ ] **Step 9 — RoPE kernel.** Rotate-half pairing, Llama 3 scaled frequencies precomputed on the CPU.
 - [ ] **Step 10 — Attention (prefill).** Per-head scores, GQA (8 KV heads shared by 32 query heads), causal mask, softmax, weighted sum of values, output projection, residual.

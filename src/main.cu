@@ -93,6 +93,14 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaDeviceSynchronize());  // wait for the kernel; also surfaces errors inside it
     dumpBuffer("out/embed.bin", d_hidden, (size_t)T * HIDDEN);
 
+    // ---- Step 7: RMSNorm (layer 0's input_layernorm) → normalized copy of x
+    bf16* d_norm = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_norm, (size_t)MAX_PROMPT_LEN * HIDDEN * sizeof(bf16)));
+    rmsNorm(d_hidden, w.layers[0].attn_norm, d_norm, T);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    dumpBuffer("out/l0_attn_norm.bin", d_norm, (size_t)T * HIDDEN);
+
+    CUDA_CHECK(cudaFree(d_norm));
     CUDA_CHECK(cudaFree(d_hidden));
     CUDA_CHECK(cudaFree(d_tokens));
     freeWeights(w);
