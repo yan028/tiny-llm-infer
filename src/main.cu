@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "kernels.h"
+#include "linear.h"
 #include "model.h"
 
 static void printGPU() {
@@ -100,6 +101,25 @@ int main(int argc, char** argv) {
     CUDA_CHECK(cudaDeviceSynchronize());
     dumpBuffer("out/l0_attn_norm.bin", d_norm, (size_t)T * HIDDEN);
 
+    // ---- Step 8: Q/K/V projections (layer 0) with cuBLAS
+    cublasHandle_t cublas;
+    CUBLAS_CHECK(cublasCreate(&cublas));
+    bf16 *d_q = nullptr, *d_k = nullptr, *d_v = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_q, (size_t)MAX_PROMPT_LEN * HIDDEN * sizeof(bf16)));
+    CUDA_CHECK(cudaMalloc(&d_k, (size_t)MAX_PROMPT_LEN * KV_DIM * sizeof(bf16)));
+    CUDA_CHECK(cudaMalloc(&d_v, (size_t)MAX_PROMPT_LEN * KV_DIM * sizeof(bf16)));
+    linear(cublas, d_norm, w.layers[0].q, d_q, T, HIDDEN, HIDDEN);  // [T,2048]·[2048,2048]ᵀ
+    linear(cublas, d_norm, w.layers[0].k, d_k, T, HIDDEN, KV_DIM);  // [T,2048]·[512,2048]ᵀ
+    linear(cublas, d_norm, w.layers[0].v, d_v, T, HIDDEN, KV_DIM);
+    CUDA_CHECK(cudaDeviceSynchronize());
+    dumpBuffer("out/l0_q.bin", d_q, (size_t)T * HIDDEN);
+    dumpBuffer("out/l0_k.bin", d_k, (size_t)T * KV_DIM);
+    dumpBuffer("out/l0_v.bin", d_v, (size_t)T * KV_DIM);
+
+    CUDA_CHECK(cudaFree(d_q));
+    CUDA_CHECK(cudaFree(d_k));
+    CUDA_CHECK(cudaFree(d_v));
+    CUBLAS_CHECK(cublasDestroy(cublas));
     CUDA_CHECK(cudaFree(d_norm));
     CUDA_CHECK(cudaFree(d_hidden));
     CUDA_CHECK(cudaFree(d_tokens));
