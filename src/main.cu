@@ -116,6 +116,19 @@ int main(int argc, char** argv) {
     dumpBuffer("out/l0_k.bin", d_k, (size_t)T * KV_DIM);
     dumpBuffer("out/l0_v.bin", d_v, (size_t)T * KV_DIM);
 
+    // ---- Step 9: RoPE on Q and K (in place). V is not rotated.
+    float inv_freq[ROPE_PAIRS];
+    computeRopeInvFreq(inv_freq);
+    float* d_inv_freq = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_inv_freq, sizeof(inv_freq)));
+    CUDA_CHECK(cudaMemcpy(d_inv_freq, inv_freq, sizeof(inv_freq), cudaMemcpyHostToDevice));
+    rope(d_q, d_inv_freq, T, N_Q_HEADS);   // 32 heads
+    rope(d_k, d_inv_freq, T, N_KV_HEADS);  // 8 heads
+    CUDA_CHECK(cudaDeviceSynchronize());
+    dumpBuffer("out/l0_q_rope.bin", d_q, (size_t)T * HIDDEN);
+    dumpBuffer("out/l0_k_rope.bin", d_k, (size_t)T * KV_DIM);
+    CUDA_CHECK(cudaFree(d_inv_freq));
+
     CUDA_CHECK(cudaFree(d_q));
     CUDA_CHECK(cudaFree(d_k));
     CUDA_CHECK(cudaFree(d_v));

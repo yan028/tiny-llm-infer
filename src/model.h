@@ -17,6 +17,13 @@ constexpr int KV_DIM = N_KV_HEADS * HEAD_DIM;  // 512
 constexpr int FFN = 8192;                      // intermediate_size
 constexpr int VOCAB = 128256;                  // vocab_size
 constexpr float RMS_EPS = 1e-5f;               // rms_norm_eps
+// RoPE (config.json: rope_theta and rope_scaling, rope_type "llama3")
+constexpr float ROPE_THETA = 500000.0f;
+constexpr float ROPE_FACTOR = 32.0f;           // slow pairs rotate this many times slower
+constexpr float ROPE_LOW_FREQ_FACTOR = 1.0f;   // < 1 full turn in 8192 positions: fully slowed
+constexpr float ROPE_HIGH_FREQ_FACTOR = 4.0f;  // > 4 full turns: unchanged; between: blended
+constexpr float ROPE_ORIGINAL_CTX = 8192.0f;   // original_max_position_embeddings
+constexpr int ROPE_PAIRS = HEAD_DIM / 2;       // 32 pairs per head: dims (i, i + 32)
 constexpr int MAX_PROMPT_LEN = 512;  // our own limit; buffers are sized for this many tokens
 
 using bf16 = __nv_bfloat16;
