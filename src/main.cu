@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "attention.h"
 #include "kernels.h"
 #include "linear.h"
 #include "model.h"
@@ -36,6 +37,16 @@ static void dumpBuffer(const std::string& path, const bf16* d_ptr, size_t n) {
     std::filesystem::create_directories(std::filesystem::path(path).parent_path());
     std::ofstream f(path, std::ios::binary);
     f.write(reinterpret_cast<const char*>(host.data()), n * sizeof(bf16));
+    std::printf("dumped %s (%zu values)\n", path.c_str(), n);
+}
+
+// Same as dumpBuffer, for fp32 GPU buffers (compare with --dtype f32).
+static void dumpFloats(const std::string& path, const float* d_ptr, size_t n) {
+    std::vector<float> host(n);
+    CUDA_CHECK(cudaMemcpy(host.data(), d_ptr, n * sizeof(float), cudaMemcpyDeviceToHost));
+    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
+    std::ofstream f(path, std::ios::binary);
+    f.write(reinterpret_cast<const char*>(host.data()), n * sizeof(float));
     std::printf("dumped %s (%zu values)\n", path.c_str(), n);
 }
 
@@ -128,6 +139,24 @@ int main(int argc, char** argv) {
     dumpBuffer("out/l0_q_rope.bin", d_q, (size_t)T * HIDDEN);
     dumpBuffer("out/l0_k_rope.bin", d_k, (size_t)T * KV_DIM);
     CUDA_CHECK(cudaFree(d_inv_freq));
+
+    // ---- Step 10: attention → O projection → residual add (layer 0)
+    AttentionBuffers att = allocAttention();
+    attention(cublas, d_q, d_k, d_v, att, T);
+    bf16* d_o = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_o, (size_t)MAX_PROMPT_LEN * HIDDEN * sizeof(bf16)));
+    linear(cublas, att.out, w.layers[0].o, d_o, T, HIDDEN, HIDDEN);  // mix the 32 heads
+    CUDA_CHECK(cudaDeviceSynchronize());
+    // Dump before the residual add overwrites x.
+    dumpFloats("out/l0_scores.bin", att.scores, (size_t)N_Q_HEADS * T * T);
+    dumpBuffer("out/l0_probs.bin", att.probs, (size_t)N_Q_HEADS * T * T);
+    dumpBuffer("out/l0_attn_out.bin", att.out, (size_t)T * HIDDEN);
+    dumpBuffer("out/l0_o_proj.bin", d_o, (size_t)T * HIDDEN);
+    residualAdd(d_hidden, d_o, (size_t)T * HIDDEN);  // x = x + o
+    CUDA_CHECK(cudaDeviceSynchronize());
+    dumpBuffer("out/l0_resid1.bin", d_hidden, (size_t)T * HIDDEN);
+    CUDA_CHECK(cudaFree(d_o));
+    freeAttention(att);
 
     CUDA_CHECK(cudaFree(d_q));
     CUDA_CHECK(cudaFree(d_k));

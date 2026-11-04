@@ -112,3 +112,18 @@ void rope(bf16* x, const float* d_inv_freq, int T, int n_heads) {
     ropeKernel<<<T, n_heads * ROPE_PAIRS>>>(x, d_inv_freq, n_heads);  // Q: 1024 threads, K: 256
     CUDA_CHECK(cudaGetLastError());
 }
+
+// ---- Step 10: residual add. One thread per value; values are independent.
+__global__ void residualAddKernel(bf16* x, const bf16* y, size_t n) {
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;  // global thread index
+    if (i < n) {  // the last block can run past the end
+        x[i] = __float2bfloat16(__bfloat162float(x[i]) + __bfloat162float(y[i]));
+    }
+}
+
+void residualAdd(bf16* x, const bf16* y, size_t n) {
+    const int threads = 256;
+    const int blocks = (int)((n + threads - 1) / threads);  // round up
+    residualAddKernel<<<blocks, threads>>>(x, y, n);
+    CUDA_CHECK(cudaGetLastError());
+}

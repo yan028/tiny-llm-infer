@@ -14,3 +14,6 @@ void rmsNorm(const bf16* in, const bf16* weight, bf16* out, int T);
 void computeRopeInvFreq(float inv_freq[ROPE_PAIRS]);
 // Rotate every head of x in place. x is [T, n_heads * 64] (Q: 32 heads, K: 8 heads).
 void rope(bf16* x, const float* d_inv_freq, int T, int n_heads);
+
+// Step 10: residual add, x += y, for n values (the residual stream update).
+void residualAdd(bf16* x, const bf16* y, size_t n);
