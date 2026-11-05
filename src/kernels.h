@@ -17,3 +17,6 @@ void rope(bf16* x, const float* d_inv_freq, int T, int n_heads);
 
 // Step 10: residual add, x += y, for n values (the residual stream update).
 void residualAdd(bf16* x, const bf16* y, size_t n);
+
+// Step 11: SwiGLU activation, in place: gate[i] = silu(gate[i]) * up[i], for n values.
+void siluMul(bf16* gate, const bf16* up, size_t n);

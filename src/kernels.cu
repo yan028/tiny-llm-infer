@@ -127,3 +127,22 @@ void residualAdd(bf16* x, const bf16* y, size_t n) {
     residualAddKernel<<<blocks, threads>>>(x, y, n);
     CUDA_CHECK(cudaGetLastError());
 }
+
+// ---- Step 11: SwiGLU activation. One thread per value, like residualAdd.
+//   silu(z) = z * sigmoid(z) = z / (1 + e^-z): ~0 for negative z, ~z for positive z.
+//   Multiplying by up lets the gate decide, per token and per feature, how much passes.
+__global__ void siluMulKernel(bf16* gate, const bf16* up, size_t n) {
+    const size_t i = (size_t)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const float g = __bfloat162float(gate[i]);
+        const float u = __bfloat162float(up[i]);
+        gate[i] = __float2bfloat16(g / (1.0f + expf(-g)) * u);
+    }
+}
+
+void siluMul(bf16* gate, const bf16* up, size_t n) {
+    const int threads = 256;
+    const int blocks = (int)((n + threads - 1) / threads);
+    siluMulKernel<<<blocks, threads>>>(gate, up, n);
+    CUDA_CHECK(cudaGetLastError());
+}

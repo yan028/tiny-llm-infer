@@ -155,8 +155,30 @@ int main(int argc, char** argv) {
     residualAdd(d_hidden, d_o, (size_t)T * HIDDEN);  // x = x + o
     CUDA_CHECK(cudaDeviceSynchronize());
     dumpBuffer("out/l0_resid1.bin", d_hidden, (size_t)T * HIDDEN);
-    CUDA_CHECK(cudaFree(d_o));
     freeAttention(att);
+
+    // ---- Step 11: MLP (SwiGLU) → residual add. Completes layer 0.
+    bf16 *d_gate = nullptr, *d_up = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_gate, (size_t)MAX_PROMPT_LEN * FFN * sizeof(bf16)));  // 8 MB
+    CUDA_CHECK(cudaMalloc(&d_up, (size_t)MAX_PROMPT_LEN * FFN * sizeof(bf16)));
+    rmsNorm(d_hidden, w.layers[0].mlp_norm, d_norm, T);  // second norm, its own weight
+    linear(cublas, d_norm, w.layers[0].gate, d_gate, T, HIDDEN, FFN);  // 2048 → 8192
+    linear(cublas, d_norm, w.layers[0].up, d_up, T, HIDDEN, FFN);      // 2048 → 8192
+    CUDA_CHECK(cudaDeviceSynchronize());
+    dumpBuffer("out/l0_mlp_norm.bin", d_norm, (size_t)T * HIDDEN);
+    dumpBuffer("out/l0_gate.bin", d_gate, (size_t)T * FFN);
+    dumpBuffer("out/l0_up.bin", d_up, (size_t)T * FFN);
+    siluMul(d_gate, d_up, (size_t)T * FFN);  // d_gate now holds silu(gate) * up
+    linear(cublas, d_gate, w.layers[0].down, d_o, T, FFN, HIDDEN);  // 8192 → 2048 (reuses d_o)
+    CUDA_CHECK(cudaDeviceSynchronize());
+    dumpBuffer("out/l0_silu_mul.bin", d_gate, (size_t)T * FFN);
+    dumpBuffer("out/l0_down.bin", d_o, (size_t)T * HIDDEN);
+    residualAdd(d_hidden, d_o, (size_t)T * HIDDEN);  // x = x + down
+    CUDA_CHECK(cudaDeviceSynchronize());
+    dumpBuffer("out/layer0_out.bin", d_hidden, (size_t)T * HIDDEN);
+    CUDA_CHECK(cudaFree(d_gate));
+    CUDA_CHECK(cudaFree(d_up));
+    CUDA_CHECK(cudaFree(d_o));
 
     CUDA_CHECK(cudaFree(d_q));
     CUDA_CHECK(cudaFree(d_k));
