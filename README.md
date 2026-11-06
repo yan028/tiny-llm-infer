@@ -68,7 +68,7 @@ Milestone 1 is the course's "single token inference": produce the same first tok
 - [x] **Step 9 — RoPE kernel.** Rotate-half pairing, Llama 3 scaled frequencies precomputed on the CPU; max rel err 3.2e-3.
 - [x] **Step 10 — Attention (prefill).** Per-head scores, GQA (8 KV heads shared by 32 query heads), causal mask, softmax, weighted sum of values, output projection, residual.
 - [x] **Step 11 — MLP (SwiGLU).** gate and up (2048 → 8192), SiLU gating, down (8192 → 2048), residual.
-- [ ] **Step 12 — Full forward pass → first token.** 16 layers, final norm, logits via the tied embedding table, argmax.
+- [x] **Step 12 — Full forward pass → first token.** 16 layers, final norm, logits via the tied embedding table, argmax. **Predicts `The` (791) with the same top-5 as Hugging Face; logits rel err 7.4e-3 vs the fp32 reference; prefill of 42 tokens in 27 ms on an RTX 5060.**
 
 After the first token:
 

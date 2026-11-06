@@ -24,3 +24,16 @@ void linear(cublasHandle_t handle, const bf16* x, const bf16* W, bf16* y, int T,
                               CUBLAS_GEMM_DEFAULT));
     // clang-format on
 }
+
+void linearF32(cublasHandle_t handle, const bf16* x, const bf16* W, float* y, int T, int in_dim,
+               int out_dim) {
+    const float alpha = 1.0f, beta = 0.0f;
+    // clang-format off
+    CUBLAS_CHECK(cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, out_dim, T, in_dim, &alpha,
+                              W, CUDA_R_16BF, in_dim,
+                              x, CUDA_R_16BF, in_dim,
+                              &beta,
+                              y, CUDA_R_32F, out_dim,    // only difference: fp32 output
+                              CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
+    // clang-format on
+}

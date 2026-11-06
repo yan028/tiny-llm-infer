@@ -1,12 +1,10 @@
-// tiny-llm-infer entry point. Step 4: load the weights and prove the pointers are right.
+// tiny-llm-infer: run Llama 3.2 1B Instruct on a prompt and predict the next token.
 #include <cstdio>
-#include <filesystem>
 #include <fstream>
 #include <string>
 #include <vector>
 
-#include "attention.h"
-#include "kernels.h"
+#include "forward.h"
 #include "linear.h"
 #include "model.h"
 
@@ -19,38 +17,7 @@ static void printGPU() {
                 p.multiProcessorCount, free_b / 1e9, total_b / 1e9);
 }
 
-// Copy the first n bf16 values of a GPU tensor back to the host and print them as floats.
-// Same format as python/inspect_safetensors.py, so the two outputs can be compared by eye.
-static void printFirst(const char* name, const bf16* gpu_ptr, int n = 8) {
-    bf16 host[8];
-    CUDA_CHECK(cudaMemcpy(host, gpu_ptr, n * sizeof(bf16), cudaMemcpyDeviceToHost));
-    std::printf("  %s: [", name);
-    for (int i = 0; i < n; ++i)
-        std::printf("'%.6g'%s", __bfloat162float(host[i]), i + 1 < n ? ", " : "");
-    std::printf("]\n");
-}
-
-// Copy n bf16 values from the GPU and write them raw to a file, for python/compare.py.
-static void dumpBuffer(const std::string& path, const bf16* d_ptr, size_t n) {
-    std::vector<bf16> host(n);
-    CUDA_CHECK(cudaMemcpy(host.data(), d_ptr, n * sizeof(bf16), cudaMemcpyDeviceToHost));
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    std::ofstream f(path, std::ios::binary);
-    f.write(reinterpret_cast<const char*>(host.data()), n * sizeof(bf16));
-    std::printf("dumped %s (%zu values)\n", path.c_str(), n);
-}
-
-// Same as dumpBuffer, for fp32 GPU buffers (compare with --dtype f32).
-static void dumpFloats(const std::string& path, const float* d_ptr, size_t n) {
-    std::vector<float> host(n);
-    CUDA_CHECK(cudaMemcpy(host.data(), d_ptr, n * sizeof(float), cudaMemcpyDeviceToHost));
-    std::filesystem::create_directories(std::filesystem::path(path).parent_path());
-    std::ofstream f(path, std::ios::binary);
-    f.write(reinterpret_cast<const char*>(host.data()), n * sizeof(float));
-    std::printf("dumped %s (%zu values)\n", path.c_str(), n);
-}
-
-// Step 5: read the prompt's token ids (written by python/reference.py) from a text file.
+// Read the prompt's token ids (written by python/reference.py) from a text file.
 static std::vector<int> readTokens(const std::string& path) {
     std::ifstream f(path);
     if (!f) {
@@ -75,117 +42,42 @@ static std::vector<int> readTokens(const std::string& path) {
 int main(int argc, char** argv) {
     std::string path = argc > 1 ? argv[1] : "models/llama-3.2-1b-instruct/model.safetensors";
     printGPU();
-
     Weights w = loadWeights(path);
-    printGPU();
 
-    std::printf("first 8 values (compare with python/inspect_safetensors.py):\n");
-    printFirst("model.embed_tokens.weight", w.embed);
-    printFirst("model.layers.15.mlp.down_proj.weight", w.layers[15].down);
-
-    // ---- Step 5: token ids → GPU
     std::vector<int> tokens = readTokens("dumps/tokens.txt");
     const int T = (int)tokens.size();
-
-    int* d_tokens = nullptr;  // d_ prefix = lives on the device (GPU)
+    int* d_tokens = nullptr;
     CUDA_CHECK(cudaMalloc(&d_tokens, MAX_PROMPT_LEN * sizeof(int)));
     CUDA_CHECK(cudaMemcpy(d_tokens, tokens.data(), T * sizeof(int), cudaMemcpyHostToDevice));
 
-    // Round trip: copy back from the GPU and check nothing changed.
-    std::vector<int> check(T);
-    CUDA_CHECK(cudaMemcpy(check.data(), d_tokens, T * sizeof(int), cudaMemcpyDeviceToHost));
-    std::printf("tokens: %d on GPU, round trip %s\n", T, check == tokens ? "OK" : "MISMATCH");
-    std::printf("  first 5: %d %d %d %d %d ... last: %d\n", tokens[0], tokens[1], tokens[2],
-                tokens[3], tokens[4], tokens[T - 1]);
-
-    // ---- Step 6: embedding gather → hidden state (the residual stream x)
-    bf16* d_hidden = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_hidden, (size_t)MAX_PROMPT_LEN * HIDDEN * sizeof(bf16)));
-    embeddingGather(d_tokens, w.embed, d_hidden, T);
-    CUDA_CHECK(cudaDeviceSynchronize());  // wait for the kernel; also surfaces errors inside it
-    dumpBuffer("out/embed.bin", d_hidden, (size_t)T * HIDDEN);
-
-    // ---- Step 7: RMSNorm (layer 0's input_layernorm) → normalized copy of x
-    bf16* d_norm = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_norm, (size_t)MAX_PROMPT_LEN * HIDDEN * sizeof(bf16)));
-    rmsNorm(d_hidden, w.layers[0].attn_norm, d_norm, T);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    dumpBuffer("out/l0_attn_norm.bin", d_norm, (size_t)T * HIDDEN);
-
-    // ---- Step 8: Q/K/V projections (layer 0) with cuBLAS
     cublasHandle_t cublas;
     CUBLAS_CHECK(cublasCreate(&cublas));
-    bf16 *d_q = nullptr, *d_k = nullptr, *d_v = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_q, (size_t)MAX_PROMPT_LEN * HIDDEN * sizeof(bf16)));
-    CUDA_CHECK(cudaMalloc(&d_k, (size_t)MAX_PROMPT_LEN * KV_DIM * sizeof(bf16)));
-    CUDA_CHECK(cudaMalloc(&d_v, (size_t)MAX_PROMPT_LEN * KV_DIM * sizeof(bf16)));
-    linear(cublas, d_norm, w.layers[0].q, d_q, T, HIDDEN, HIDDEN);  // [T,2048]·[2048,2048]ᵀ
-    linear(cublas, d_norm, w.layers[0].k, d_k, T, HIDDEN, KV_DIM);  // [T,2048]·[512,2048]ᵀ
-    linear(cublas, d_norm, w.layers[0].v, d_v, T, HIDDEN, KV_DIM);
-    CUDA_CHECK(cudaDeviceSynchronize());
-    dumpBuffer("out/l0_q.bin", d_q, (size_t)T * HIDDEN);
-    dumpBuffer("out/l0_k.bin", d_k, (size_t)T * KV_DIM);
-    dumpBuffer("out/l0_v.bin", d_v, (size_t)T * KV_DIM);
+    Activations act = allocActivations();
+    printGPU();
 
-    // ---- Step 9: RoPE on Q and K (in place). V is not rotated.
-    float inv_freq[ROPE_PAIRS];
-    computeRopeInvFreq(inv_freq);
-    float* d_inv_freq = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_inv_freq, sizeof(inv_freq)));
-    CUDA_CHECK(cudaMemcpy(d_inv_freq, inv_freq, sizeof(inv_freq), cudaMemcpyHostToDevice));
-    rope(d_q, d_inv_freq, T, N_Q_HEADS);   // 32 heads
-    rope(d_k, d_inv_freq, T, N_KV_HEADS);  // 8 heads
-    CUDA_CHECK(cudaDeviceSynchronize());
-    dumpBuffer("out/l0_q_rope.bin", d_q, (size_t)T * HIDDEN);
-    dumpBuffer("out/l0_k_rope.bin", d_k, (size_t)T * KV_DIM);
-    CUDA_CHECK(cudaFree(d_inv_freq));
+    // Run 1: with dumps, for checking against the reference.
+    Prediction p = forward(cublas, w, d_tokens, T, act, /*dumps=*/true);
+    std::printf("prompt: %d tokens\nnext token: %d\ntop-5:", T, p.top_ids[0]);
+    for (int i = 0; i < 5; ++i) std::printf("  %d (%.2f)", p.top_ids[i], p.top_logits[i]);
+    std::printf("\n");
 
-    // ---- Step 10: attention → O projection → residual add (layer 0)
-    AttentionBuffers att = allocAttention();
-    attention(cublas, d_q, d_k, d_v, att, T);
-    bf16* d_o = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_o, (size_t)MAX_PROMPT_LEN * HIDDEN * sizeof(bf16)));
-    linear(cublas, att.out, w.layers[0].o, d_o, T, HIDDEN, HIDDEN);  // mix the 32 heads
-    CUDA_CHECK(cudaDeviceSynchronize());
-    // Dump before the residual add overwrites x.
-    dumpFloats("out/l0_scores.bin", att.scores, (size_t)N_Q_HEADS * T * T);
-    dumpBuffer("out/l0_probs.bin", att.probs, (size_t)N_Q_HEADS * T * T);
-    dumpBuffer("out/l0_attn_out.bin", att.out, (size_t)T * HIDDEN);
-    dumpBuffer("out/l0_o_proj.bin", d_o, (size_t)T * HIDDEN);
-    residualAdd(d_hidden, d_o, (size_t)T * HIDDEN);  // x = x + o
-    CUDA_CHECK(cudaDeviceSynchronize());
-    dumpBuffer("out/l0_resid1.bin", d_hidden, (size_t)T * HIDDEN);
-    freeAttention(att);
+    // Run 2: no dumps, timed with CUDA events (GPU-side timestamps).
+    cudaEvent_t start, stop;
+    CUDA_CHECK(cudaEventCreate(&start));
+    CUDA_CHECK(cudaEventCreate(&stop));
+    CUDA_CHECK(cudaEventRecord(start));
+    Prediction p2 = forward(cublas, w, d_tokens, T, act, /*dumps=*/false);
+    CUDA_CHECK(cudaEventRecord(stop));
+    CUDA_CHECK(cudaEventSynchronize(stop));
+    float ms = 0;
+    CUDA_CHECK(cudaEventElapsedTime(&ms, start, stop));
+    std::printf("prefill of %d tokens: %.2f ms (same token: %s)\n", T, ms,
+                p2.top_ids[0] == p.top_ids[0] ? "yes" : "NO");
 
-    // ---- Step 11: MLP (SwiGLU) → residual add. Completes layer 0.
-    bf16 *d_gate = nullptr, *d_up = nullptr;
-    CUDA_CHECK(cudaMalloc(&d_gate, (size_t)MAX_PROMPT_LEN * FFN * sizeof(bf16)));  // 8 MB
-    CUDA_CHECK(cudaMalloc(&d_up, (size_t)MAX_PROMPT_LEN * FFN * sizeof(bf16)));
-    rmsNorm(d_hidden, w.layers[0].mlp_norm, d_norm, T);  // second norm, its own weight
-    linear(cublas, d_norm, w.layers[0].gate, d_gate, T, HIDDEN, FFN);  // 2048 → 8192
-    linear(cublas, d_norm, w.layers[0].up, d_up, T, HIDDEN, FFN);      // 2048 → 8192
-    CUDA_CHECK(cudaDeviceSynchronize());
-    dumpBuffer("out/l0_mlp_norm.bin", d_norm, (size_t)T * HIDDEN);
-    dumpBuffer("out/l0_gate.bin", d_gate, (size_t)T * FFN);
-    dumpBuffer("out/l0_up.bin", d_up, (size_t)T * FFN);
-    siluMul(d_gate, d_up, (size_t)T * FFN);  // d_gate now holds silu(gate) * up
-    linear(cublas, d_gate, w.layers[0].down, d_o, T, FFN, HIDDEN);  // 8192 → 2048 (reuses d_o)
-    CUDA_CHECK(cudaDeviceSynchronize());
-    dumpBuffer("out/l0_silu_mul.bin", d_gate, (size_t)T * FFN);
-    dumpBuffer("out/l0_down.bin", d_o, (size_t)T * HIDDEN);
-    residualAdd(d_hidden, d_o, (size_t)T * HIDDEN);  // x = x + down
-    CUDA_CHECK(cudaDeviceSynchronize());
-    dumpBuffer("out/layer0_out.bin", d_hidden, (size_t)T * HIDDEN);
-    CUDA_CHECK(cudaFree(d_gate));
-    CUDA_CHECK(cudaFree(d_up));
-    CUDA_CHECK(cudaFree(d_o));
-
-    CUDA_CHECK(cudaFree(d_q));
-    CUDA_CHECK(cudaFree(d_k));
-    CUDA_CHECK(cudaFree(d_v));
+    CUDA_CHECK(cudaEventDestroy(start));
+    CUDA_CHECK(cudaEventDestroy(stop));
+    freeActivations(act);
     CUBLAS_CHECK(cublasDestroy(cublas));
-    CUDA_CHECK(cudaFree(d_norm));
-    CUDA_CHECK(cudaFree(d_hidden));
     CUDA_CHECK(cudaFree(d_tokens));
     freeWeights(w);
     return 0;

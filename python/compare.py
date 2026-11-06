@@ -34,9 +34,16 @@ def main():
         "--dtype", default="bf16", choices=["bf16", "f32"], help="dtype of the test file"
     )
     ap.add_argument("--tol", type=float, default=2e-2, help="max relative error to call it a PASS")
+    ap.add_argument(
+        "--last-row", action="store_true", help="compare only the last row of the reference"
+    )
     args = ap.parse_args()
 
     ref = load(args.ref, "f32")
+    if args.last_row:  # e.g. logits: the engine only computes the last token's row
+        with open(os.path.join(os.path.dirname(args.ref), "index.json")) as f:
+            rows, cols = json.load(f)[os.path.splitext(os.path.basename(args.ref))[0]]
+        ref = ref.reshape(rows, cols)[-1].copy()
     test = load(args.test, args.dtype)
     if ref.size != test.size:
         sys.exit(f"FAIL: size mismatch: ref has {ref.size} values, test has {test.size}")
@@ -60,7 +67,7 @@ def main():
     if os.path.exists(idx_path):
         with open(idx_path) as f:
             shape = json.load(f).get(name)
-        if shape:
+        if shape and not args.last_row:
             idx = tuple(int(i) for i in np.unravel_index(worst, shape))
             where = f"index {idx} of shape {tuple(shape)}"
 

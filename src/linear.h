@@ -22,3 +22,7 @@
 // Same as `h @ W.T` in python/reference.py. Accumulates in fp32.
 void linear(cublasHandle_t handle, const bf16* x, const bf16* W, bf16* y, int T, int in_dim,
             int out_dim);
+
+// Same as linear(), but writes fp32 output (used for the logits).
+void linearF32(cublasHandle_t handle, const bf16* x, const bf16* W, float* y, int T, int in_dim,
+               int out_dim);

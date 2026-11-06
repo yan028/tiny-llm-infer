@@ -12,6 +12,6 @@ endif()
 
 find_package(CUDAToolkit REQUIRED)
 
-add_executable(tiny_infer src/main.cu src/loader.cu src/kernels.cu src/linear.cu src/attention.cu)
+add_executable(tiny_infer src/main.cu src/loader.cu src/kernels.cu src/linear.cu src/attention.cu src/forward.cu)
 target_include_directories(tiny_infer PRIVATE include src)
 target_link_libraries(tiny_infer PRIVATE CUDA::cudart CUDA::cublas)
